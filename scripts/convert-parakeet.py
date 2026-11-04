@@ -421,6 +421,33 @@ VARIANT_PROFILES: dict[str, dict] = {
         "license_name": "openmdw-1.1",
         "license_link": "https://openmdw.ai/license/1-1/",
     },
+    # Adalat AI's Koyal Indic fine-tune of nemotron-3.5-asr-streaming-0.6b
+    # (adalat-ai/koyal-indic-600m-1.0). Same cache-aware FastConformer
+    # encoder and 128-slot prompt MLP structure; the tokenizer is replaced
+    # by a 6000-piece SentencePiece model (no <lang-XX> tags) and the RNN-T
+    # decoder is retrained. general.languages advertises both the BCP-47
+    # prompt keys hi-IN / kn-IN / ml-IN / te-IN (slots nemotron-3.5's
+    # dictionary already has; nemotron itself is trained only on hi-IN of
+    # these) and bare codes hi / kn / ml / te, which language-ID models and
+    # most callers pass. The source dictionary has bare 'hi' only, so
+    # prompt_aliases adds kn / ml / te. The 'auto' slot was never trained,
+    # so lang_detect is off and callers must pass a language.
+    "koyal-indic-600m-1.0": {
+        "variant": "koyal-indic-600m-1.0",
+        "display_name": "Koyal Indic 600M",
+        "version": "v1",
+        "size_label": "0.6B",
+        "basename": "parakeet-rnnt",
+        "head_kind": "rnnt",
+        "expected_vocab_size": 6000,
+        "languages": ["hi", "kn", "ml", "te", "hi-IN", "kn-IN", "ml-IN", "te-IN"],
+        "prompt_aliases": {"kn": "kn-IN", "ml": "ml-IN", "te": "te-IN"},
+        "lang_detect": False,
+        "has_prompt": True,
+        "license": "other",
+        "license_name": "openmdw-1.1",
+        "license_link": "https://openmdw.ai/license/1-1/",
+    },
     # Cache-aware streaming RNN-T with always-on speaker-kernel FF
     # injection. Full speaker-attributed decoding requires an external
     # Sortformer diarizer and is outside this variant's runtime scope.
@@ -1990,6 +2017,16 @@ def convert(model_spec: str, out_path: Path, repo_id: str | None = None,
         for k, v in prompt_dict.items():
             locales.append(str(k))
             indices.append(int(v))
+        # Profile-supplied short aliases ("ml" -> "ml-IN") for locales
+        # whose source dictionary has no bare-code entry.
+        for alias, target in profile.get("prompt_aliases", {}).items():
+            if alias in prompt_dict:
+                continue
+            if target not in prompt_dict:
+                raise ValueError(f"prompt alias {alias!r} -> {target!r}: "
+                                 f"{target!r} not in prompt_dictionary")
+            locales.append(alias)
+            indices.append(int(prompt_dict[target]))
         # 'auto' is the language-detection sentinel in the prompt
         # dictionary; surface it separately so Stage 4 wiring doesn't
         # have to string-grep the dictionary at runtime.
