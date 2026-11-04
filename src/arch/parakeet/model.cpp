@@ -706,14 +706,22 @@ static void normalize_transcript_whitespace(std::string & s) {
     s.swap(norm);
 }
 
-// Valid length of each pre_encode stage: [0] = mel frames (n_samples / hop
-// under kestrel masking), [1..3] = after each stride-2 conv.
+// Valid length of each pre_encode stage: [0] = real mel frames, [1..3] =
+// after each stride-2 conv. The mel has one frame more than NeMo's
+// get_seq_len (n_samples / hop), a zeroed pad; kestrel and nemo masking
+// start from n_samples / hop and mask it out. nemo masking is for the
+// classic-Conformer striding (4x) models (koyal-*-120m-1.0): unmasked, the
+// pad becomes an extra encoder frame whenever the real frame count is a
+// multiple of 4, and with full-clip attention that can change the
+// transcript (seen against NeMo on a koyal-ml-120m clip). striding has two
+// stages; its [3] repeats [2], so [3] is the encoder length either way.
 static std::array<int, 4> pre_encode_stage_lengths(const ParakeetHParams & hp, int n_samples, int mel_frames) {
     const bool         causal = (hp.enc_att_context_style == ParakeetHParams::AttContextStyle::ChunkedLimited);
     std::array<int, 4> len{};
-    len[0] = hp.kestrel_length_masking ? n_samples / hp.fe_hop_length : mel_frames;
+    len[0] = hp.masks_every_run() ? n_samples / hp.fe_hop_length : mel_frames;
     for (int d = 1; d < 4; ++d) {
-        len[static_cast<size_t>(d)] = pre_encode_time_out(len[static_cast<size_t>(d - 1)], causal);
+        const int prev              = len[static_cast<size_t>(d - 1)];
+        len[static_cast<size_t>(d)] = d <= hp.pre_encode_stages() ? pre_encode_time_out(prev, causal) : prev;
     }
     return len;
 }
@@ -1137,7 +1145,9 @@ transcribe_status run_one_shot_inner(ParakeetSession *             pc,
         }
     }
     const int    mt_keep_frames = static_cast<int>(mt_keep.size());
-    const bool   kestrel_masks  = pm->hparams.kestrel_length_masking;
+    // kestrel / nemo masking masks even a single clip (see
+    // pre_encode_stage_lengths); other variants mask only mixed-length batches.
+    const bool   kestrel_masks  = pm->hparams.masks_every_run();
     EncoderBuild eb = build_encoder_graph(pc->compute_ctx, pm->weights, pm->hparams, mel_n_frames, resolved_kv,
                                           pm->backend.c_str(), /*buf_mask=*/nullptr, /*n_batch=*/1,
                                           /*batch_var_len=*/kestrel_masks, spk_supervision, mt_keep_frames);
@@ -1813,8 +1823,8 @@ static transcribe_status run_batch_encode(ParakeetSession *                     
                                           int64_t                                 total_mel_us,
                                           const transcribe_run_params *           params) {
     const int n       = static_cast<int>(mels.size());
-    // kestrel masking masks every batch: n_samples / hop can trail the mel.
-    bool      var_len = pm->hparams.kestrel_length_masking;
+    // kestrel / nemo masking masks every batch: n_samples / hop can trail the mel.
+    bool      var_len = pm->hparams.masks_every_run();
     for (int b = 0; b < n; ++b) {
         if (nf[b] != T_max) {
             var_len = true;

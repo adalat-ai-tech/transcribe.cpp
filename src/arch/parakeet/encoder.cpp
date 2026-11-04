@@ -325,7 +325,7 @@ EncoderBuild build_encoder_graph(ggml_context *                     ctx,
     if (n_batch < 1) {
         n_batch = 1;
     }
-    const bool       var_len_masks = batch_var_len && (n_batch > 1 || hp.kestrel_length_masking);
+    const bool       var_len_masks = batch_var_len && (n_batch > 1 || hp.masks_every_run());
     conf::ConvPolicy policy{};
     // A 1x1 pointwise conv cannot mix time frames, so masking after its
     // ReLU also implements Transformers' mask-after-every-conv semantics.
@@ -339,7 +339,8 @@ EncoderBuild build_encoder_graph(ggml_context *                     ctx,
     // CausalConv2D for the pre-encode subsample (left=k-1, right=stride-1).
     // Inferred from the attention style — only ChunkedLimited is causal.
     // Independent of the conformer conv-module's conv_context.
-    policy.causal_pre_encode = (hp.enc_att_context_style == ParakeetHParams::AttContextStyle::ChunkedLimited);
+    policy.causal_pre_encode   = (hp.enc_att_context_style == ParakeetHParams::AttContextStyle::ChunkedLimited);
+    policy.striding_pre_encode = (hp.enc_pre_encode_kind == ParakeetHParams::PreEncodeKind::Striding);
 
     EncoderBuild eb{};
 
@@ -351,13 +352,15 @@ EncoderBuild build_encoder_graph(ggml_context *                     ctx,
         return eb;
     }
 
-    // Only subsampling_factor=8 (every published variant) is implemented;
-    // a different factor would need a build_pre_encode rework.
-    if (hp.enc_subsampling_factor != 8) {
+    // build_pre_encode implements two pre_encode kinds, each at one factor:
+    // dw_striding at 8x (causal or not) and striding at 4x (non-causal only;
+    // a chunked_limited striding model is rejected). Any other kind or
+    // factor, or causal striding, needs a build_pre_encode rework.
+    const int want_factor = policy.striding_pre_encode ? 4 : 8;
+    if (hp.enc_subsampling_factor != want_factor || (policy.striding_pre_encode && policy.causal_pre_encode)) {
         log_msg(TRANSCRIBE_LOG_LEVEL_ERROR,
-                "parakeet encoder: unsupported subsampling_factor=%d "
-                "(only 8 implemented)",
-                hp.enc_subsampling_factor);
+                "parakeet encoder: unsupported pre_encode (subsampling_factor=%d, striding=%d, causal=%d)",
+                hp.enc_subsampling_factor, policy.striding_pre_encode ? 1 : 0, policy.causal_pre_encode ? 1 : 0);
         return eb;
     }
     if (hp.fe_num_mels <= 0 || (hp.fe_num_mels % hp.enc_subsampling_factor) != 0) {
@@ -1077,6 +1080,7 @@ VadBuild build_vad_graph(ggml_context *          ctx,
     policy.causal_pre_encode            = false;
     policy.pre_encode_mask_after_stride = hp.kestrel_length_masking && !hp.mask_after_pointwise;
     policy.pre_encode_f32_pointwise     = hp.kestrel_length_masking;
+    policy.striding_pre_encode          = (hp.enc_pre_encode_kind == ParakeetHParams::PreEncodeKind::Striding);
 
     vb.mel_in = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, n_mel_frames, hp.fe_num_mels, 1, 1);
     ggml_set_name(vb.mel_in, "vad.mel.in");
